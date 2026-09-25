@@ -35,6 +35,14 @@ python3 app.py --db ./data.db --port 8325
 
 除`/health`和`/`外，请求需提供`X-User-Id`、`X-Role`，可选`X-Org`。
 
+## 份额台账与批单
+
+- `bind`动作必须在`data.shares`中录入份额台账：`[{"reinsurer":"SwissRe","share_pct":0.6,"capacity":1000000}]`。再保险人不得重复，`share_pct`合计必须为1（100%），否则绑单不能确认。
+- `calculate`按份额生成`allocations`逐家摊回明细；再保险人`capacity`不足的部分计入该家`uncovered`，并汇总为`uncovered_amount`。
+- `settle`生成`bills`逐家账单，并把当时的份额、明细和账单固化到`settled_snapshot`，财务据此向各再保险人开账。
+- `endorse`动作（underwriter角色）在`bound`/`claim_submitted`/`calculated`状态可用，必须提供`reason`和新的`shares`；未结算案件按最新批单重算摊回明细，已结算记录不允许批单、快照不受影响。历史版本保存在`share_history`，当前版本为`share_version`。
+- 记录详情（`GET /api/records/{id}`及演示页详情区）展示份额台账、逐家摊回金额和批单版本。
+
 ## 测试
 
 ```bash

@@ -7,7 +7,8 @@ from src.domain import Actor, Conflict
 
 
 CREATE_DATA = {'event_id': 'CAT-2026-01', 'attachment': 1000000.0, 'limit': 5000000.0, 'cession_pct': 0.4, 'loss_amount': 3000000.0, 'reinstatement_pct': 0.15, 'aggregate_prior': 0.0}
-FLOW = [('bind', 'underwriter', {'underwriter_id': 'UW-8'}, 'bound'), ('submit_claim', 'claims_officer', {'claim_number': 'CLM-88', 'event_id': 'CAT-2026-01'}, 'claim_submitted'), ('calculate', 'claims_officer', {'approved_loss': 2800000.0}, 'calculated'), ('settle', 'finance', {'payment_reference': 'PAY-1'}, 'settled')]
+SHARES = [{'reinsurer': 'SwissRe', 'share_pct': 0.6, 'capacity': 1000000.0}, {'reinsurer': 'MunichRe', 'share_pct': 0.4, 'capacity': 1000000.0}]
+FLOW = [('bind', 'underwriter', {'underwriter_id': 'UW-8', 'shares': SHARES}, 'bound'), ('submit_claim', 'claims_officer', {'claim_number': 'CLM-88', 'event_id': 'CAT-2026-01'}, 'claim_submitted'), ('calculate', 'claims_officer', {'approved_loss': 2800000.0}, 'calculated'), ('settle', 'finance', {'payment_reference': 'PAY-1'}, 'settled')]
 
 
 class WorkflowTest(unittest.TestCase):

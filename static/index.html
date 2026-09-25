@@ -8,8 +8,14 @@
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
     main { max-width: 960px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
+    input { padding: .5rem; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
     .row { display: flex; gap: 1rem; align-items: center; }
+    table { border-collapse: collapse; margin: .5rem 0 1rem; width: 100%; }
+    th, td { border: 1px solid #d5dbe3; padding: .4rem .6rem; text-align: left; }
+    th { background: #eef2f6; }
+    .uncovered { color: #b3261e; font-weight: 600; }
+    .muted { color: #5b6572; }
   </style>
 </head>
 <body>
@@ -17,6 +23,12 @@
   <h1>再保险合约与巨灾暴露管理</h1>
   <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
   <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
+  <h2>记录详情</h2>
+  <div class="row">
+    <input id="rid" type="number" min="1" placeholder="记录ID" style="width:8rem">
+    <button id="detail">查看详情</button>
+  </div>
+  <div id="detailView"></div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
 </main>
 <script>
@@ -25,9 +37,49 @@ async function show(path) {
   const response = await fetch(path, {headers});
   const data = await response.json();
   document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+  return data;
+}
+function esc(s){return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function money(n){return Number(n).toLocaleString("zh-CN",{minimumFractionDigits:2});}
+function pct(n){return (Number(n)*100).toFixed(1)+"%";}
+function sharesTable(shares){
+  let rows = shares.map(s=>`<tr><td>${esc(s.reinsurer)}</td><td>${pct(s.share_pct)}</td><td>${money(s.capacity)}</td></tr>`).join("");
+  return `<table><tr><th>再保险人</th><th>份额比例</th><th>额度</th></tr>${rows}</table>`;
+}
+function allocationsTable(allocations){
+  let rows = allocations.map(a=>{
+    const un = Number(a.uncovered)>0 ? `<span class="uncovered">${money(a.uncovered)}</span>` : money(a.uncovered);
+    return `<tr><td>${esc(a.reinsurer)}</td><td>${pct(a.share_pct)}</td><td>${money(a.allocated)}</td><td>${money(a.billed)}</td><td>${un}</td></tr>`;
+  }).join("");
+  return `<table><tr><th>再保险人</th><th>份额</th><th>应摊回</th><th>可开账金额</th><th>未覆盖</th></tr>${rows}</table>`;
+}
+function renderDetail(record){
+  const p = record.payload || {};
+  let html = `<h3>${esc(record.reference)} <span class="muted">状态 ${esc(record.state)} / 版本 ${record.version}</span></h3>`;
+  if (p.share_version) html += `<p>份额台账当前版本：<b>V${p.share_version}</b></p>`;
+  if (Array.isArray(p.shares) && p.shares.length) html += `<h4>份额台账</h4>${sharesTable(p.shares)}`;
+  if (Array.isArray(p.allocations) && p.allocations.length) {
+    html += `<h4>逐家摊回明细（按批单V${p.allocations_version}计算）</h4>${allocationsTable(p.allocations)}`;
+    html += `<p>摊回合计 ${money(p.recoverable_amount)}，未覆盖合计 <span class="uncovered">${money(p.uncovered_amount||0)}</span></p>`;
+  }
+  if (Array.isArray(p.bills) && p.bills.length) {
+    const rows = p.bills.map(b=>`<tr><td>${esc(b.reinsurer)}</td><td>${money(b.amount)}</td></tr>`).join("");
+    html += `<h4>结算账单（快照于批单V${p.settled_snapshot && p.settled_snapshot.share_version}）</h4><table><tr><th>再保险人</th><th>账单金额</th></tr>${rows}</table>`;
+  }
+  if (Array.isArray(p.share_history) && p.share_history.length) {
+    const items = p.share_history.map(h=>`<li>V${h.version}：${esc(h.reason)}（${h.shares.map(s=>esc(s.reinsurer)+" "+pct(s.share_pct)).join("，")}）</li>`).join("");
+    html += `<h4>批单版本</h4><ul>${items}</ul>`;
+  }
+  document.getElementById("detailView").innerHTML = html;
 }
 document.getElementById("load").onclick = () => show("/api/records?limit=20");
 document.getElementById("stats").onclick = () => show("/api/stats");
+document.getElementById("detail").onclick = async () => {
+  const id = document.getElementById("rid").value;
+  if (!id) return;
+  const record = await show("/api/records/" + id);
+  if (record && record.id) renderDetail(record);
+};
 </script>
 </body>
 </html>
