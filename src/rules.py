@@ -1,13 +1,66 @@
 """再保险合约与巨灾暴露管理领域规则与状态转换。"""
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
 
 
 INITIAL_STATE = "quoted"
 CREATE_ROLES = {'underwriter'}
-ACTION_ROLES = {'bind': {'underwriter'}, 'submit_claim': {'claims_officer'}, 'calculate': {'claims_officer'}, 'settle': {'finance'}, 'reject': {'finance', 'claims_officer'}}
-TRANSITIONS = {'bind': {'quoted': 'bound'}, 'submit_claim': {'bound': 'claim_submitted'}, 'calculate': {'claim_submitted': 'calculated'}, 'settle': {'calculated': 'settled'}, 'reject': {'claim_submitted': 'rejected', 'calculated': 'rejected'}}
+ACTION_ROLES = {'bind': {'underwriter'}, 'submit_claim': {'claims_officer'}, 'calculate': {'claims_officer'}, 'settle': {'finance'}, 'reject': {'finance', 'claims_officer'}, 'endorse': {'underwriter'}}
+TRANSITIONS = {'bind': {'quoted': 'bound'}, 'submit_claim': {'bound': 'claim_submitted'}, 'calculate': {'claim_submitted': 'calculated'}, 'settle': {'calculated': 'settled'}, 'reject': {'claim_submitted': 'rejected', 'calculated': 'rejected'}, 'endorse': {'bound': 'bound', 'claim_submitted': 'claim_submitted', 'calculated': 'calculated', 'settled': 'settled'}}
+
+SHARE_TOTAL_TOLERANCE = 1e-6
+
+
+def validate_shares(raw: Any) -> List[Dict[str, Any]]:
+    """校验份额台账：非空、再保险人不重复、比例合计必须为100%。"""
+    if not isinstance(raw, list) or not raw:
+        raise ValidationError("shares必须是非空列表")
+    seen = set()
+    shares: List[Dict[str, Any]] = []
+    total = 0.0
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValidationError("shares每项必须是对象")
+        reinsurer = text(item, "reinsurer")
+        if reinsurer in seen:
+            raise ValidationError("再保险人%s重复" % reinsurer)
+        seen.add(reinsurer)
+        share_pct = number(item, "share_pct", 0, 1)
+        if share_pct <= 0:
+            raise ValidationError("share_pct必须大于0")
+        limit = number(item, "limit", 0)
+        shares.append({"reinsurer": reinsurer, "share_pct": share_pct, "limit": limit})
+        total += share_pct
+    if abs(total - 1.0) > SHARE_TOTAL_TOLERANCE:
+        raise ValidationError("份额合计必须为100%%，当前为%.4f" % total)
+    return shares
+
+
+def build_breakdown(recovery: float, shares: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按份额把总摊回分摊到各家再保险人，超出该家额度的部分标为未覆盖。"""
+    breakdown: List[Dict[str, Any]] = []
+    for share in shares:
+        allocated = round(recovery * float(share["share_pct"]), 2)
+        limit = float(share["limit"])
+        covered = round(min(allocated, limit), 2)
+        uncovered = round(allocated - covered, 2)
+        if uncovered <= 0:
+            status = "covered"
+        elif covered > 0:
+            status = "partial"
+        else:
+            status = "uncovered"
+        breakdown.append({
+            "reinsurer": share["reinsurer"],
+            "share_pct": float(share["share_pct"]),
+            "limit": limit,
+            "allocated": allocated,
+            "covered": covered,
+            "uncovered": uncovered,
+            "status": status,
+        })
+    return breakdown
 
 
 class DomainRules:
@@ -67,7 +120,7 @@ class DomainRules:
             raise Conflict("当前状态不允许执行%s" % action)
         return allowed
 
-    def apply_action(self, record: Dict[str, Any], action: str, data: Dict[str, Any]) -> Tuple[str, Dict[str, Any], str]:
+    def apply_action(self, record: Dict[str, Any], action: str, data: Dict[str, Any], actor_id: str = "") -> Tuple[str, Dict[str, Any], str]:
         new_state = self.require_transition(record, action)
         data = dict(data or {})
         p = dict(record["payload"])
@@ -75,7 +128,10 @@ class DomainRules:
         summary = ""
         if action == "bind":
             changes["bound_by"] = text(data, "underwriter_id")
-            summary = "再保合约已绑定"
+            changes["share_ledger"] = validate_shares(data.get("shares"))
+            changes["endorsement_version"] = 1
+            changes["endorsements"] = []
+            summary = "再保合约已绑定，份额台账V1已确认"
         elif action == "submit_claim":
             changes["claim_number"] = text(data, "claim_number")
             changes["claim_event_id"] = text(data, "event_id")
@@ -87,12 +143,41 @@ class DomainRules:
             changes["approved_loss"] = loss
             changes["recoverable_amount"] = round(recovery, 2)
             changes["reinstatement_premium"] = round(recovery * float(p["reinstatement_pct"]), 2)
+            breakdown = build_breakdown(recovery, p.get("share_ledger") or [])
+            changes["recovery_breakdown"] = breakdown
+            changes["uncovered_amount"] = round(sum(item["uncovered"] for item in breakdown), 2)
+            changes["calculated_endorsement_version"] = int(p.get("endorsement_version", 1))
             summary = "摊回金额已计算"
         elif action == "settle":
             if float(p["recoverable_amount"]) <= 0:
                 raise ValidationError("无可结算摊回")
             changes["payment_reference"] = text(data, "payment_reference")
+            changes["settlement_snapshot"] = {
+                "endorsement_version": int(p.get("endorsement_version", 1)),
+                "shares": p.get("share_ledger") or [],
+                "bills": p.get("recovery_breakdown") or [],
+                "uncovered_amount": float(p.get("uncovered_amount", 0.0)),
+            }
             summary = "摊回赔款已结算"
+        elif action == "endorse":
+            reason = text(data, "reason")
+            shares = validate_shares(data.get("shares"))
+            version = int(p.get("endorsement_version", 1)) + 1
+            endorsements = list(p.get("endorsements") or [])
+            endorsements.append({"version": version, "reason": reason, "shares": shares, "issued_by": actor_id})
+            changes["share_ledger"] = shares
+            changes["endorsements"] = endorsements
+            changes["endorsement_version"] = version
+            if record["state"] == "calculated":
+                breakdown = build_breakdown(float(p["recoverable_amount"]), shares)
+                changes["recovery_breakdown"] = breakdown
+                changes["uncovered_amount"] = round(sum(item["uncovered"] for item in breakdown), 2)
+                changes["calculated_endorsement_version"] = version
+                summary = "批单V%s已签发，未结算案件已按最新份额重算" % version
+            elif record["state"] == "settled":
+                summary = "批单V%s已签发，已结算账单不受影响" % version
+            else:
+                summary = "批单V%s已签发" % version
         elif action == "reject":
             changes["reject_reason"] = text(data, "reject_reason")
             summary = "赔案已拒绝"

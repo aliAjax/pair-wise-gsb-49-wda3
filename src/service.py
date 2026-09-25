@@ -51,7 +51,7 @@ class Service:
             raise PermissionDenied("角色无权执行该操作")
         record = self.repository.get(record_id)
         self.rules.require_transition(record, action)
-        new_state, new_payload, summary = self.rules.apply_action(record, action, data or {})
+        new_state, new_payload, summary = self.rules.apply_action(record, action, data or {}, actor_id=actor.user_id)
         return self.repository.mutate(
             record_id=record_id,
             expected_version=int(expected_version),

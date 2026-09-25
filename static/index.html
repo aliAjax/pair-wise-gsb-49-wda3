@@ -8,26 +8,99 @@
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
     main { max-width: 960px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
+    input { padding: .45rem .6rem; width: 8rem; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: 1rem; align-items: center; margin-bottom: .8rem; }
+    table { border-collapse: collapse; width: 100%; margin: .6rem 0 1.2rem; }
+    th, td { border: 1px solid #d5dbe3; padding: .45rem .6rem; text-align: left; font-size: .92rem; }
+    th { background: #eef2f6; }
+    h2 { font-size: 1.1rem; margin: 1.4rem 0 .4rem; }
+    .tag { display: inline-block; padding: .1rem .5rem; border-radius: 10px; font-size: .8rem; background: #e3ecf7; }
+    .uncovered { color: #b3261e; font-weight: 600; }
+    .muted { color: #5b6672; font-size: .88rem; }
+    #detail { display: none; }
   </style>
 </head>
 <body>
 <main>
   <h1>再保险合约与巨灾暴露管理</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
   <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
+  <div class="row">
+    <input id="record-id" type="number" min="1" placeholder="记录ID">
+    <button id="load-detail">查看详情</button>
+    <span class="muted">详情含份额台账、逐家摊回明细与批单版本</span>
+  </div>
+  <div id="detail"></div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
 </main>
 <script>
 const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
+const fmt = (n) => Number(n).toLocaleString("zh-CN", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const pct = (n) => (Number(n) * 100).toFixed(2) + "%";
+const STATUS_LABEL = {covered: "已覆盖", partial: "部分覆盖", uncovered: "未覆盖"};
+
 async function show(path) {
   const response = await fetch(path, {headers});
   const data = await response.json();
   document.getElementById("output").textContent = JSON.stringify(data, null, 2);
 }
+
+function shareTable(shares) {
+  const rows = (shares || []).map(s =>
+    `<tr><td>${s.reinsurer}</td><td>${pct(s.share_pct)}</td><td>${fmt(s.limit)}</td></tr>`).join("");
+  return `<table><tr><th>再保险人</th><th>份额比例</th><th>额度</th></tr>${rows}</table>`;
+}
+
+function breakdownTable(items) {
+  const rows = (items || []).map(b => {
+    const cls = b.uncovered > 0 ? "uncovered" : "";
+    return `<tr><td>${b.reinsurer}</td><td>${pct(b.share_pct)}</td><td>${fmt(b.allocated)}</td>` +
+      `<td>${fmt(b.limit)}</td><td>${fmt(b.covered)}</td>` +
+      `<td class="${cls}">${fmt(b.uncovered)}</td><td>${STATUS_LABEL[b.status] || b.status}</td></tr>`;
+  }).join("");
+  return `<table><tr><th>再保险人</th><th>份额</th><th>应摊金额</th><th>额度</th><th>覆盖金额</th><th>未覆盖</th><th>状态</th></tr>${rows}</table>`;
+}
+
+function endorsementList(endorsements) {
+  if (!endorsements || !endorsements.length) return "<p class='muted'>无批单，当前为绑单时确认的V1份额。</p>";
+  return endorsements.map(e =>
+    `<h2>批单V${e.version} <span class="tag">${e.issued_by || ""}</span></h2>` +
+    `<p>原因：${e.reason}</p>${shareTable(e.shares)}`).join("");
+}
+
+async function showDetail(id) {
+  const response = await fetch("/api/records/" + id, {headers});
+  const record = await response.json();
+  const box = document.getElementById("detail");
+  if (!response.ok) {
+    box.style.display = "none";
+    document.getElementById("output").textContent = JSON.stringify(record, null, 2);
+    return;
+  }
+  const p = record.payload || {};
+  let html = `<h2>记录 #${record.id} ${record.reference} <span class="tag">${record.state}</span></h2>` +
+    `<p>总摊回：${fmt(p.recoverable_amount || 0)}　未覆盖合计：<span class="uncovered">${fmt(p.uncovered_amount || 0)}</span>` +
+    `　当前份额版本：V${p.endorsement_version || 1}` +
+    (p.calculated_endorsement_version ? `（明细按V${p.calculated_endorsement_version}计算）` : "") + `</p>`;
+  html += `<h2>当前份额台账（V${p.endorsement_version || 1}）</h2>` + shareTable(p.share_ledger);
+  if (p.recovery_breakdown) html += `<h2>逐家摊回明细</h2>` + breakdownTable(p.recovery_breakdown);
+  if (p.settlement_snapshot) {
+    const s = p.settlement_snapshot;
+    html += `<h2>结算账单快照（V${s.endorsement_version}，不受后续批单影响）</h2>` +
+      `<p>未覆盖合计：<span class="uncovered">${fmt(s.uncovered_amount || 0)}</span></p>` + breakdownTable(s.bills);
+  }
+  html += `<h2>批单历史</h2>` + endorsementList(p.endorsements);
+  box.innerHTML = html;
+  box.style.display = "block";
+  document.getElementById("output").textContent = JSON.stringify(record, null, 2);
+}
+
 document.getElementById("load").onclick = () => show("/api/records?limit=20");
 document.getElementById("stats").onclick = () => show("/api/stats");
+document.getElementById("load-detail").onclick = () => {
+  const id = document.getElementById("record-id").value;
+  if (id) showDetail(id);
+};
 </script>
 </body>
 </html>
